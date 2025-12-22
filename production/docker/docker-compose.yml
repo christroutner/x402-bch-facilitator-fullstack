@@ -1,0 +1,16 @@
+# Start the service with the command 'docker-compose up -d'
+
+services:
+    x402-bch-facilitator:
+      build: .
+      container_name: x402-bch-facilitator
+      logging:
+        driver: 'json-file'
+        options:
+          max-size: '10m'
+          max-file: '10'
+      ports:
+        - '4345:4345' # <host port>:<container port>
+      volumes:
+        - ./.env:/home/safeuser/.env
+      restart: always
