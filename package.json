@@ -4,7 +4,7 @@
   "main": "bch-facilitator.js",
   "type": "module",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1",
+    "test": "TEST=unit mocha \"test/unit/**/*-unit.js\" --exit",
     "start": "node bch-facilitator.js",
     "lint": "standard --env mocha --fix"
   },
@@ -20,6 +20,18 @@
     "minimal-slp-wallet": "7.0.3"
   },
   "devDependencies": {
+    "chai": "6.2.1",
+    "lodash.clonedeep": "^4.5.0",
+    "mocha": "11.7.5",
+    "sinon": "21.0.1",
     "standard": "17.1.2"
+  },
+  "release": {
+    "publish": [
+      {
+        "path": "@semantic-release/npm",
+        "npmPublish": false
+      }
+    ]
   }
 }
