@@ -55,19 +55,31 @@ class FacilitatorRESTControllerLib {
         })
       }
 
+      // Note: x402Version is handled by the use case for backward compatibility
+      // Version can be extracted from req.body.x402Version or req.body.paymentPayload?.x402Version if needed
+
       const result = await this.useCases.facilitator.verifyPayment(
         req.body.paymentPayload,
         req.body.paymentRequirements
       )
 
-      // Add invalidReason if payment is invalid
+      // Build response body with required fields
       const responseBody = {
         isValid: result.isValid,
-        payer: result.payer
+        payer: result.payer || ''
       }
 
+      // Add invalidReason if payment is invalid
       if (!result.isValid && result.invalidReason) {
         responseBody.invalidReason = result.invalidReason
+      }
+
+      // Include optional fields if available (v2 format)
+      if (result.remainingBalanceSat !== undefined) {
+        responseBody.remainingBalanceSat = result.remainingBalanceSat
+      }
+      if (result.ledgerEntry) {
+        responseBody.ledgerEntry = result.ledgerEntry
       }
 
       return res.status(200).json(responseBody)
@@ -89,6 +101,9 @@ class FacilitatorRESTControllerLib {
           error: 'Missing paymentPayload or paymentRequirements'
         })
       }
+
+      // Note: x402Version is handled by the use case for backward compatibility
+      // Version can be extracted from req.body.x402Version or req.body.paymentPayload?.x402Version if needed
 
       const result = await this.useCases.facilitator.settlePayment(
         req.body.paymentPayload,
