@@ -104,14 +104,28 @@ describe('#bin/server.js', () => {
   describe('#sleep', () => {
     it('should sleep for specified milliseconds', async () => {
       const server = new Server()
-      const start = Date.now()
-      await server.sleep(100)
-      const end = Date.now()
-      const elapsed = end - start
+      const clock = sandbox.useFakeTimers()
 
-      // Allow some tolerance for timing (system can be slow)
-      assert.isAtLeast(elapsed, 90)
-      assert.isAtMost(elapsed, 300)
+      // Start the sleep promise
+      const sleepPromise = server.sleep(100)
+
+      // Verify that the promise doesn't resolve before the time has elapsed
+      let resolved = false
+      sleepPromise.then(() => { resolved = true })
+
+      // Process any pending microtasks
+      await Promise.resolve()
+
+      // Advance time by 99ms - promise should not resolve yet
+      clock.tick(99)
+      await Promise.resolve() // Allow promise handlers to run
+      assert.isFalse(resolved, 'Sleep should not resolve before the specified time')
+
+      // Advance time by 1ms more to reach 100ms - promise should resolve
+      clock.tick(1)
+      await Promise.resolve() // Allow promise handlers to run
+      await sleepPromise
+      assert.isTrue(resolved, 'Sleep should resolve after the specified time')
     })
   })
 })
