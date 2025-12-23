@@ -122,6 +122,7 @@ describe('#controllers/rest-api/facilitator/controller.js', () => {
 
       const mockReq = {
         body: {
+          x402Version: 2,
           paymentPayload: { test: 'payload' },
           paymentRequirements: { test: 'requirements' }
         }
@@ -136,6 +137,46 @@ describe('#controllers/rest-api/facilitator/controller.js', () => {
       assert.isTrue(mockFacilitatorUseCase.verifyPayment.calledOnce)
       assert.isTrue(mockRes.status.calledWith(200))
       assert.isTrue(mockRes.json.calledOnce)
+    })
+
+    it('should include optional response fields when available', async () => {
+      const controller = new FacilitatorRESTControllerLib({
+        adapters: mockAdapters,
+        useCases: mockUseCases
+      })
+
+      mockFacilitatorUseCase.verifyPayment.resolves({
+        isValid: true,
+        payer: 'bitcoincash:qptest',
+        remainingBalanceSat: '9000',
+        ledgerEntry: {
+          utxoId: 'tx123:0',
+          transactionValueSat: '20000',
+          totalDebitedSat: '11000',
+          lastUpdated: '2025-11-08T17:05:42.000Z'
+        }
+      })
+
+      const mockReq = {
+        body: {
+          x402Version: 2,
+          paymentPayload: { test: 'payload' },
+          paymentRequirements: { test: 'requirements' }
+        }
+      }
+      const mockRes = {
+        status: sandbox.stub().returnsThis(),
+        json: sandbox.stub()
+      }
+
+      await controller.verifyPayment(mockReq, mockRes)
+
+      const jsonCall = mockRes.json.firstCall.args[0]
+      assert.isTrue(jsonCall.isValid)
+      assert.equal(jsonCall.payer, 'bitcoincash:qptest')
+      assert.equal(jsonCall.remainingBalanceSat, '9000')
+      assert.property(jsonCall, 'ledgerEntry')
+      assert.equal(jsonCall.ledgerEntry.utxoId, 'tx123:0')
     })
 
     it('should return 400 when paymentPayload is missing', async () => {
@@ -249,6 +290,7 @@ describe('#controllers/rest-api/facilitator/controller.js', () => {
 
       const mockReq = {
         body: {
+          x402Version: 2,
           paymentPayload: { test: 'payload' },
           paymentRequirements: { test: 'requirements' }
         }

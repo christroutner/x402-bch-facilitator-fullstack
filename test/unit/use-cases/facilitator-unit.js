@@ -79,7 +79,7 @@ describe('#use-cases/facilitator.js', () => {
   })
 
   describe('#listSupportedKinds', () => {
-    it('should return supported payment kinds', () => {
+    it('should return supported payment kinds in v2 format', () => {
       const useCase = new FacilitatorUseCase({ adapters: mockAdapters })
       const result = useCase.listSupportedKinds()
 
@@ -87,10 +87,15 @@ describe('#use-cases/facilitator.js', () => {
       assert.isArray(result.kinds)
       assert.lengthOf(result.kinds, 1)
       assert.deepEqual(result.kinds[0], {
-        x402Version: 1,
-        scheme: 'exact',
-        network: 'bch'
+        x402Version: 2,
+        scheme: 'utxo',
+        network: 'bip122:000000000000000000651ef99cb9fcbe'
       })
+      assert.property(result, 'extensions')
+      assert.isArray(result.extensions)
+      assert.property(result, 'signers')
+      assert.property(result.signers, 'bip122:*')
+      assert.isArray(result.signers['bip122:*'])
     })
   })
 
@@ -126,7 +131,7 @@ describe('#use-cases/facilitator.js', () => {
       assert.include(result.errorMessage, 'UTXO database not initialized')
     })
 
-    it('should validate new UTXO and add to database', async () => {
+    it('should validate new UTXO and add to database with v1 minAmountRequired', async () => {
       const useCase = new FacilitatorUseCase({ adapters: mockAdapters })
       const paymentPayload = {
         payload: {
@@ -138,6 +143,34 @@ describe('#use-cases/facilitator.js', () => {
         }
       }
       const paymentRequirements = { minAmountRequired: 1000 }
+
+      mockUtxoDb.get.rejects(new Error('NotFound'))
+      mockBchWallet.validateUtxo.resolves({
+        isValid: true,
+        utxoAmountSat: 2000,
+        receiverAddress: 'bitcoincash:qptest'
+      })
+
+      const result = await useCase.validateUtxo({ paymentPayload, paymentRequirements })
+
+      assert.isTrue(result.isValid)
+      assert.property(result, 'remainingBalanceSat')
+      assert.property(result, 'utxoInfo')
+      assert.isTrue(mockUtxoDb.put.calledOnce)
+    })
+
+    it('should validate new UTXO and add to database with v2 amount field', async () => {
+      const useCase = new FacilitatorUseCase({ adapters: mockAdapters })
+      const paymentPayload = {
+        payload: {
+          authorization: {
+            txid: 'tx123',
+            vout: 0,
+            from: 'bitcoincash:qptest'
+          }
+        }
+      }
+      const paymentRequirements = { amount: '1000' }
 
       mockUtxoDb.get.rejects(new Error('NotFound'))
       mockBchWallet.validateUtxo.resolves({
@@ -243,7 +276,7 @@ describe('#use-cases/facilitator.js', () => {
   })
 
   describe('#verifyPayment', () => {
-    const createValidPaymentPayload = () => ({
+    const createValidPaymentPayloadV1 = () => ({
       x402Version: 1,
       scheme: 'utxo',
       network: 'bch',
@@ -260,17 +293,45 @@ describe('#use-cases/facilitator.js', () => {
       }
     })
 
-    const createValidPaymentRequirements = () => ({
+    const createValidPaymentPayloadV2 = () => ({
+      x402Version: 2,
+      accepted: {
+        scheme: 'utxo',
+        network: 'bip122:000000000000000000651ef99cb9fcbe',
+        amount: '1000',
+        payTo: 'bitcoincash:qprecv'
+      },
+      payload: {
+        signature: 'test-signature',
+        authorization: {
+          from: 'bitcoincash:qptest',
+          to: 'bitcoincash:qprecv',
+          value: '1000',
+          txid: 'tx123',
+          vout: 0,
+          amount: '2000'
+        }
+      }
+    })
+
+    const createValidPaymentRequirementsV1 = () => ({
       scheme: 'utxo',
       network: 'bch',
       minAmountRequired: 1000,
       payTo: 'bitcoincash:qprecv'
     })
 
+    const createValidPaymentRequirementsV2 = () => ({
+      scheme: 'utxo',
+      network: 'bip122:000000000000000000651ef99cb9fcbe',
+      amount: '1000',
+      payTo: 'bitcoincash:qprecv'
+    })
+
     it('should return invalid when network does not match', async () => {
       const useCase = new FacilitatorUseCase({ adapters: mockAdapters })
-      const paymentPayload = createValidPaymentPayload()
-      const paymentRequirements = { ...createValidPaymentRequirements(), network: 'btc' }
+      const paymentPayload = createValidPaymentPayloadV1()
+      const paymentRequirements = { ...createValidPaymentRequirementsV1(), network: 'btc' }
 
       const result = await useCase.verifyPayment(paymentPayload, paymentRequirements)
 
@@ -280,8 +341,8 @@ describe('#use-cases/facilitator.js', () => {
 
     it('should return invalid when scheme does not match', async () => {
       const useCase = new FacilitatorUseCase({ adapters: mockAdapters })
-      const paymentPayload = { ...createValidPaymentPayload(), scheme: 'account' }
-      const paymentRequirements = createValidPaymentRequirements()
+      const paymentPayload = { ...createValidPaymentPayloadV1(), scheme: 'account' }
+      const paymentRequirements = createValidPaymentRequirementsV1()
 
       const result = await useCase.verifyPayment(paymentPayload, paymentRequirements)
 
@@ -292,7 +353,7 @@ describe('#use-cases/facilitator.js', () => {
     it('should return invalid when payload is missing', async () => {
       const useCase = new FacilitatorUseCase({ adapters: mockAdapters })
       const paymentPayload = { scheme: 'utxo', network: 'bch' }
-      const paymentRequirements = createValidPaymentRequirements()
+      const paymentRequirements = createValidPaymentRequirementsV1()
 
       const result = await useCase.verifyPayment(paymentPayload, paymentRequirements)
 
@@ -302,8 +363,8 @@ describe('#use-cases/facilitator.js', () => {
 
     it('should return invalid when signature verification fails', async () => {
       const useCase = new FacilitatorUseCase({ adapters: mockAdapters })
-      const paymentPayload = createValidPaymentPayload()
-      const paymentRequirements = createValidPaymentRequirements()
+      const paymentPayload = createValidPaymentPayloadV1()
+      const paymentRequirements = createValidPaymentRequirementsV1()
 
       mockBchjs.BitcoinCash.verifyMessage.returns(false)
       mockUtxoDb.get.rejects(new Error('NotFound'))
@@ -319,10 +380,10 @@ describe('#use-cases/facilitator.js', () => {
       assert.equal(result.invalidReason, 'invalid_exact_bch_payload_signature')
     })
 
-    it('should verify valid payment', async () => {
+    it('should verify valid payment with v1 format', async () => {
       const useCase = new FacilitatorUseCase({ adapters: mockAdapters })
-      const paymentPayload = createValidPaymentPayload()
-      const paymentRequirements = createValidPaymentRequirements()
+      const paymentPayload = createValidPaymentPayloadV1()
+      const paymentRequirements = createValidPaymentRequirementsV1()
 
       mockBchjs.BitcoinCash.verifyMessage.returns(true)
       mockUtxoDb.get.rejects(new Error('NotFound'))
@@ -336,12 +397,53 @@ describe('#use-cases/facilitator.js', () => {
 
       assert.isTrue(result.isValid)
       assert.equal(result.payer, 'bitcoincash:qptest')
+      assert.property(result, 'remainingBalanceSat')
+      assert.property(result, 'ledgerEntry')
+    })
+
+    it('should verify valid payment with v2 format', async () => {
+      const useCase = new FacilitatorUseCase({ adapters: mockAdapters })
+      const paymentPayload = createValidPaymentPayloadV2()
+      const paymentRequirements = createValidPaymentRequirementsV2()
+
+      mockBchjs.BitcoinCash.verifyMessage.returns(true)
+      mockUtxoDb.get.rejects(new Error('NotFound'))
+      mockBchWallet.validateUtxo.resolves({
+        isValid: true,
+        utxoAmountSat: 2000,
+        receiverAddress: 'bitcoincash:qptest'
+      })
+
+      const result = await useCase.verifyPayment(paymentPayload, paymentRequirements)
+
+      assert.isTrue(result.isValid)
+      assert.equal(result.payer, 'bitcoincash:qptest')
+      assert.property(result, 'remainingBalanceSat')
+      assert.property(result, 'ledgerEntry')
+    })
+
+    it('should handle CAIP-2 network format', async () => {
+      const useCase = new FacilitatorUseCase({ adapters: mockAdapters })
+      const paymentPayload = createValidPaymentPayloadV2()
+      const paymentRequirements = createValidPaymentRequirementsV2()
+
+      mockBchjs.BitcoinCash.verifyMessage.returns(true)
+      mockUtxoDb.get.rejects(new Error('NotFound'))
+      mockBchWallet.validateUtxo.resolves({
+        isValid: true,
+        utxoAmountSat: 2000,
+        receiverAddress: 'bitcoincash:qptest'
+      })
+
+      const result = await useCase.verifyPayment(paymentPayload, paymentRequirements)
+
+      assert.isTrue(result.isValid)
     })
 
     it('should handle signature verification errors', async () => {
       const useCase = new FacilitatorUseCase({ adapters: mockAdapters })
-      const paymentPayload = createValidPaymentPayload()
-      const paymentRequirements = createValidPaymentRequirements()
+      const paymentPayload = createValidPaymentPayloadV1()
+      const paymentRequirements = createValidPaymentRequirementsV1()
 
       const sigError = new Error('Signature error')
       mockBchjs.BitcoinCash.verifyMessage.throws(sigError)
@@ -355,7 +457,7 @@ describe('#use-cases/facilitator.js', () => {
   })
 
   describe('#settlePayment', () => {
-    const createValidPaymentPayload = () => ({
+    const createValidPaymentPayloadV1 = () => ({
       x402Version: 1,
       scheme: 'utxo',
       network: 'bch',
@@ -372,29 +474,58 @@ describe('#use-cases/facilitator.js', () => {
       }
     })
 
-    const createValidPaymentRequirements = () => ({
+    const createValidPaymentPayloadV2 = () => ({
+      x402Version: 2,
+      accepted: {
+        scheme: 'utxo',
+        network: 'bip122:000000000000000000651ef99cb9fcbe',
+        amount: '1000',
+        payTo: 'bitcoincash:qprecv'
+      },
+      payload: {
+        signature: 'test-signature',
+        authorization: {
+          from: 'bitcoincash:qptest',
+          to: 'bitcoincash:qprecv',
+          value: '1000',
+          txid: 'tx123',
+          vout: 0,
+          amount: '2000'
+        }
+      }
+    })
+
+    const createValidPaymentRequirementsV1 = () => ({
       scheme: 'utxo',
       network: 'bch',
       minAmountRequired: 1000,
       payTo: 'bitcoincash:qprecv'
     })
 
+    const createValidPaymentRequirementsV2 = () => ({
+      scheme: 'utxo',
+      network: 'bip122:000000000000000000651ef99cb9fcbe',
+      amount: '1000',
+      payTo: 'bitcoincash:qprecv'
+    })
+
     it('should return error when verification fails', async () => {
       const useCase = new FacilitatorUseCase({ adapters: mockAdapters })
-      const paymentPayload = createValidPaymentPayload()
-      const paymentRequirements = { ...createValidPaymentRequirements(), network: 'btc' }
+      const paymentPayload = createValidPaymentPayloadV1()
+      const paymentRequirements = { ...createValidPaymentRequirementsV1(), network: 'btc' }
 
       const result = await useCase.settlePayment(paymentPayload, paymentRequirements)
 
       assert.isFalse(result.success)
       assert.property(result, 'errorReason')
       assert.equal(result.transaction, '')
+      assert.equal(result.network, 'bip122:000000000000000000651ef99cb9fcbe')
     })
 
-    it('should settle valid payment', async () => {
+    it('should settle valid payment with v1 format', async () => {
       const useCase = new FacilitatorUseCase({ adapters: mockAdapters })
-      const paymentPayload = createValidPaymentPayload()
-      const paymentRequirements = createValidPaymentRequirements()
+      const paymentPayload = createValidPaymentPayloadV1()
+      const paymentRequirements = createValidPaymentRequirementsV1()
 
       mockBchjs.BitcoinCash.verifyMessage.returns(true)
       mockUtxoDb.get.rejects(new Error('NotFound'))
@@ -408,14 +539,35 @@ describe('#use-cases/facilitator.js', () => {
 
       assert.isTrue(result.success)
       assert.equal(result.transaction, 'txid123')
-      assert.equal(result.network, 'bch')
+      assert.equal(result.network, 'bip122:000000000000000000651ef99cb9fcbe')
+      assert.equal(result.payer, 'bitcoincash:qptest')
+    })
+
+    it('should settle valid payment with v2 format', async () => {
+      const useCase = new FacilitatorUseCase({ adapters: mockAdapters })
+      const paymentPayload = createValidPaymentPayloadV2()
+      const paymentRequirements = createValidPaymentRequirementsV2()
+
+      mockBchjs.BitcoinCash.verifyMessage.returns(true)
+      mockUtxoDb.get.rejects(new Error('NotFound'))
+      mockBchWallet.validateUtxo.resolves({
+        isValid: true,
+        utxoAmountSat: 2000,
+        receiverAddress: 'bitcoincash:qptest'
+      })
+
+      const result = await useCase.settlePayment(paymentPayload, paymentRequirements)
+
+      assert.isTrue(result.success)
+      assert.equal(result.transaction, 'txid123')
+      assert.equal(result.network, 'bip122:000000000000000000651ef99cb9fcbe')
       assert.equal(result.payer, 'bitcoincash:qptest')
     })
 
     it('should handle errors during settlement', async () => {
       const useCase = new FacilitatorUseCase({ adapters: mockAdapters })
-      const paymentPayload = createValidPaymentPayload()
-      const paymentRequirements = createValidPaymentRequirements()
+      const paymentPayload = createValidPaymentPayloadV1()
+      const paymentRequirements = createValidPaymentRequirementsV1()
 
       mockBchjs.BitcoinCash.verifyMessage.returns(true)
       mockUtxoDb.get.rejects(new Error('NotFound'))
@@ -430,6 +582,7 @@ describe('#use-cases/facilitator.js', () => {
 
       assert.isFalse(result.success)
       assert.equal(result.errorReason, 'unexpected_settle_error')
+      assert.equal(result.network, 'bip122:000000000000000000651ef99cb9fcbe')
       assert.isTrue(mockLogger.error.calledOnce)
     })
   })

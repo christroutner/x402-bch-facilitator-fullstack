@@ -8,6 +8,45 @@
     until the amount is exhausted.
 */
 
+// BCH mainnet CAIP-2 identifier
+const BCH_MAINNET_CAIP2 = 'bip122:000000000000000000651ef99cb9fcbe'
+
+/**
+ * Normalizes BCH network identifiers to support both v1 ('bch') and v2 (CAIP-2) formats.
+ * Only normalizes known BCH networks; returns other networks as-is.
+ * @param {string} network - Network identifier (can be 'bch' or CAIP-2 format)
+ * @returns {string} Normalized network identifier (BCH mainnet CAIP-2 for BCH networks, original for others)
+ */
+function normalizeNetwork (network) {
+  if (!network) return BCH_MAINNET_CAIP2
+  // v1 format
+  if (network === 'bch') return BCH_MAINNET_CAIP2
+  // v2 CAIP-2 format for BCH mainnet
+  if (network === BCH_MAINNET_CAIP2) return BCH_MAINNET_CAIP2
+  // v2 CAIP-2 format pattern matching (bip122:* for BCH networks)
+  // Only normalize if it's a BCH network (mainnet or testnet)
+  if (network.startsWith('bip122:')) {
+    // For now, only normalize known BCH networks
+    // Return as-is for other bip122 networks (they might be other Bitcoin forks)
+    return network
+  }
+  // For non-BCH networks, return as-is (don't normalize to BCH)
+  return network
+}
+
+/**
+ * Checks if two network identifiers refer to the same BCH network.
+ * @param {string} network1 - First network identifier
+ * @param {string} network2 - Second network identifier
+ * @returns {boolean} True if both networks are BCH (normalized to same value)
+ */
+function networksMatch (network1, network2) {
+  const normalized1 = normalizeNetwork(network1)
+  const normalized2 = normalizeNetwork(network2)
+  // Both must normalize to BCH mainnet CAIP-2 to be considered matching
+  return normalized1 === BCH_MAINNET_CAIP2 && normalized2 === BCH_MAINNET_CAIP2 && normalized1 === normalized2
+}
+
 class FacilitatorUseCase {
   constructor (localConfig = {}) {
     this.adapters = localConfig.adapters
@@ -27,17 +66,21 @@ class FacilitatorUseCase {
   /**
    * Returns the list of payment "kinds" this facilitator supports.
    *
-   * @returns Object with array of supported payment kinds
+   * @returns Object with array of supported payment kinds, extensions, and signers
    */
   listSupportedKinds () {
     return {
       kinds: [
         {
-          x402Version: 1,
-          scheme: 'exact',
-          network: 'bch'
+          x402Version: 2,
+          scheme: 'utxo',
+          network: BCH_MAINNET_CAIP2
         }
-      ]
+      ],
+      extensions: [],
+      signers: {
+        'bip122:*': []
+      }
     }
   }
 
@@ -103,11 +146,9 @@ class FacilitatorUseCase {
       // const bchjs = walletAdapter.bchjs
 
       // Calculate the cost of the call in satoshis.
-      const callCostSat = BigInt(
-        paymentRequirements?.minAmountRequired ??
-          paymentRequirements?.maxAmountRequired ??
-          0
-      )
+      // Support both v2 'amount' field and v1 'minAmountRequired' field
+      const amountValue = paymentRequirements?.amount ?? paymentRequirements?.minAmountRequired ?? paymentRequirements?.maxAmountRequired ?? 0
+      const callCostSat = BigInt(amountValue)
       // const revalidateThresholdMs = 5 * 60 * 1000 // 5 minutes
       const { authorization } = paymentPayload.payload
       const { txid, vout } = authorization
@@ -228,16 +269,12 @@ class FacilitatorUseCase {
     try {
       const bchjs = this.adapters.bchWallet.bchjs
 
-      // Verify network matches
-      if (paymentRequirements.network !== 'bch') {
-        return {
-          isValid: false,
-          invalidReason: 'invalid_network',
-          payer: ''
-        }
-      }
+      // Extract scheme and network from v2 structure (accepted field) or v1 structure (top-level)
+      const payloadScheme = paymentPayload.accepted?.scheme ?? paymentPayload.scheme
+      const payloadNetwork = paymentPayload.accepted?.network ?? paymentPayload.network
 
-      if (paymentPayload.network !== 'bch') {
+      // Verify network matches (support both v1 'bch' and v2 CAIP-2 formats)
+      if (!networksMatch(paymentRequirements.network, payloadNetwork)) {
         return {
           isValid: false,
           invalidReason: 'invalid_network',
@@ -246,7 +283,8 @@ class FacilitatorUseCase {
       }
 
       // Verify scheme matches
-      if (paymentRequirements.scheme !== 'utxo' || paymentPayload.scheme !== 'utxo') {
+      const requirementsScheme = paymentRequirements.scheme
+      if (requirementsScheme !== 'utxo' || payloadScheme !== 'utxo') {
         return {
           isValid: false,
           invalidReason: 'invalid_scheme',
@@ -306,11 +344,26 @@ class FacilitatorUseCase {
         }
       }
 
-      return {
+      // Build response with optional fields
+      const response = {
         isValid: true,
-        payer: payerAddress,
-        utxoId: utxoValidation.utxoId
+        payer: payerAddress
       }
+
+      // Include optional fields if available
+      if (utxoValidation.remainingBalanceSat !== undefined) {
+        response.remainingBalanceSat = utxoValidation.remainingBalanceSat
+      }
+      if (utxoValidation.utxoInfo) {
+        response.ledgerEntry = {
+          utxoId: utxoValidation.utxoInfo.utxoId,
+          transactionValueSat: utxoValidation.utxoInfo.transactionValueSat,
+          totalDebitedSat: utxoValidation.utxoInfo.totalDebitedSat,
+          lastUpdated: utxoValidation.utxoInfo.lastUpdated
+        }
+      }
+
+      return response
     } catch (error) {
       this.adapters.logger.error('Error in verifyPayment:', error)
       return {
@@ -340,11 +393,12 @@ class FacilitatorUseCase {
       const verification = await this.verifyPayment(paymentPayload, paymentRequirements)
 
       if (!verification.isValid) {
+        // Always return BCH mainnet CAIP-2 format in response (this is a BCH facilitator)
         return {
           success: false,
           errorReason: verification.invalidReason || 'invalid_payment',
           transaction: '',
-          network: 'bch',
+          network: BCH_MAINNET_CAIP2,
           payer: verification.payer || ''
         }
       }
@@ -372,12 +426,13 @@ class FacilitatorUseCase {
 
       // Check facilitator balance first
       const facilitatorBalance = await wallet.getBalance({ bchAddress: facilitatorAddress })
+      // Always return BCH mainnet CAIP-2 format in response (this is a BCH facilitator)
       if (facilitatorBalance < amount) {
         return {
           success: false,
           errorReason: 'insufficient_funds',
           transaction: '',
-          network: 'bch',
+          network: BCH_MAINNET_CAIP2,
           payer: payerAddress
         }
       }
@@ -397,7 +452,7 @@ class FacilitatorUseCase {
           success: false,
           errorReason: 'invalid_transaction_state',
           transaction: '',
-          network: 'bch',
+          network: BCH_MAINNET_CAIP2,
           payer: payerAddress
         }
       }
@@ -410,23 +465,34 @@ class FacilitatorUseCase {
         // You could use bchjs.Blockchain.getTransaction(txid) to check confirmations
       }
 
-      return {
+      // Get remaining balance from verification if available
+      const remainingBalanceSat = verification.remainingBalanceSat
+
+      const response = {
         success: true,
         transaction: txid,
-        network: 'bch',
+        network: BCH_MAINNET_CAIP2,
         payer: payerAddress
       }
+
+      if (remainingBalanceSat !== undefined) {
+        response.remainingBalanceSat = remainingBalanceSat
+      }
+
+      return response
     } catch (error) {
       this.adapters.logger.error('Error in settlePayment:', error)
+      // Always return BCH mainnet CAIP-2 format in response (this is a BCH facilitator)
       return {
         success: false,
         errorReason: 'unexpected_settle_error',
         transaction: '',
-        network: 'bch',
+        network: BCH_MAINNET_CAIP2,
         payer: paymentPayload?.payload?.authorization?.from || ''
       }
     }
   }
 }
 
+export { normalizeNetwork, networksMatch }
 export default FacilitatorUseCase

@@ -1,6 +1,8 @@
 # x402-bch Facilitator Demo
 
-This directory contains the reference **Facilitator** service for the Bitcoin Cash adaptation of the x402 protocol. The facilitator (`bch-facilitator.js`) provides the `/facilitator` REST endpoints that Servers call to verify BCH payments and maintain prepaid UTXO balances, as described in the core [x402 specification](../../specs/x402-specification.md) and the BCH-focused [x402-bch specification](../../specs/x402-bch-specification.md).
+This directory contains the reference **Facilitator** service for the Bitcoin Cash adaptation of the x402 protocol. The facilitator (`bch-facilitator.js`) provides the `/facilitator` REST endpoints that Servers call to verify BCH payments and maintain prepaid UTXO balances, as described in the core [x402 specification](../../specs/x402-specification.md) and the BCH-focused [x402-bch specification v2.1](../../specs/x402-bch-specification-v2.1.md).
+
+**Protocol Version**: This facilitator supports x402-bch v2 protocol with backward compatibility for v1 requests.
 
 ## Where the Facilitator Fits
 - **Clients** broadcast BCH funding transactions and attach signed payment payloads to HTTP retries.
@@ -53,19 +55,29 @@ The service starts an Express server (see `bin/server.js`) and exposes:
 
 - `GET /health` – simple health probe.
 - `GET /` – welcome payload listing supported facilitator endpoints.
-- `GET /facilitator/supported` – announces `x402Version`, `scheme`, and `network` pairs.
-- `POST /facilitator/verify` – validates a BCH payment payload against advertised requirements, updates the ledger, and returns `{ isValid, payer, invalidReason? }`.
-- `POST /facilitator/settle` – optional reconciliation step that replays `verify` and returns settlement metadata.
+- `GET /facilitator/supported` – announces supported payment kinds in v2 format with `x402Version: 2`, `scheme: 'utxo'`, CAIP-2 network identifiers, extensions, and signers.
+- `POST /facilitator/verify` – validates a BCH payment payload against advertised requirements, updates the ledger, and returns `{ isValid, payer, invalidReason?, remainingBalanceSat?, ledgerEntry? }`.
+- `POST /facilitator/settle` – optional reconciliation step that replays `verify` and returns settlement metadata with CAIP-2 network format.
 
 Logs include every incoming request plus wallet validation details. LevelDB state is stored in `./leveldb/utxo`.
 
 ## How Verification Works
-1. **Schema checks** ensure the request matches the `utxo` scheme and `bch` network.
+1. **Schema checks** ensure the request matches the `utxo` scheme and BCH network (supports both v1 `'bch'` format and v2 CAIP-2 format `'bip122:000000000000000000651ef99cb9fcbe'`).
 2. **Signature verification** reconstitutes `JSON.stringify(authorization)` and calls `BitcoinCash.verifyMessage`.
 3. **UTXO inspection** fetches the funding transaction, verifies it paid `SERVER_BCH_ADDRESS`, and computes the satoshi value.
-4. **Ledger updates** subtract the debit amount (`minAmountRequired`) from the stored balance, rejecting if insufficient to cover the call.
+4. **Ledger updates** subtract the debit amount (supports both v1 `minAmountRequired` and v2 `amount` fields) from the stored balance, rejecting if insufficient to cover the call.
 
-This mirrors the flow in the [x402-bch specification](../../specs/x402-bch-specification.md) and allows a single on-chain payment to authorize multiple paid HTTP requests.
+This mirrors the flow in the [x402-bch specification v2.1](../../specs/x402-bch-specification-v2.1.md) and allows a single on-chain payment to authorize multiple paid HTTP requests.
+
+## Protocol Version Support
+
+This facilitator supports **x402-bch v2** protocol with the following features:
+- **CAIP-2 Network Identifiers**: Uses `bip122:000000000000000000651ef99cb9fcbe` for BCH mainnet (backward compatible with v1 `'bch'` format)
+- **PaymentPayload Structure**: Supports v2 structure with `accepted` field (backward compatible with v1 top-level `scheme`/`network`)
+- **Field Names**: Supports both v2 `amount` field and v1 `minAmountRequired` field
+- **Response Format**: Returns v2 format with optional `remainingBalanceSat` and `ledgerEntry` fields
+
+The facilitator automatically detects and handles both v1 and v2 request formats, ensuring seamless compatibility during migration periods.
 
 ## Working with the Demo Server & Client
 - Run the Facilitator alongside the example [resource server](../server/) and [client](../client/). The server will POST to `/facilitator/verify` before returning protected data, and the client will automatically retry with BCH payment headers.
@@ -79,5 +91,73 @@ This mirrors the flow in the [x402-bch specification](../../specs/x402-bch-speci
 
 ## Next Steps
 - Integrate double spend proofs when connected to bch-api back ends.
-- Extend `/facilitator/settle` to return ledger snapshots (`remainingBalanceSat`, `ledgerEntry`) as suggested by the spec.
+- The `/facilitator/verify` endpoint now returns ledger snapshots (`remainingBalanceSat`, `ledgerEntry`) as per v2 specification.
 - Combine with additional transports or marketplaces exposed via the Discovery API to build full x402-bch deployments.
+
+## Example Request/Response (v2 format)
+
+### GET /facilitator/supported
+```json
+{
+  "kinds": [
+    {
+      "x402Version": 2,
+      "scheme": "utxo",
+      "network": "bip122:000000000000000000651ef99cb9fcbe"
+    }
+  ],
+  "extensions": [],
+  "signers": {
+    "bip122:*": []
+  }
+}
+```
+
+### POST /facilitator/verify
+**Request:**
+```json
+{
+  "x402Version": 2,
+  "paymentPayload": {
+    "x402Version": 2,
+    "accepted": {
+      "scheme": "utxo",
+      "network": "bip122:000000000000000000651ef99cb9fcbe",
+      "amount": "1000",
+      "payTo": "bitcoincash:qqlrzp23w08434twmvr4fxw672whkjy0py26r63g3d"
+    },
+    "payload": {
+      "signature": "...",
+      "authorization": {
+        "from": "bitcoincash:qz9s2mccqamzppfq708cyfde5ejgmsr9hy7r3unmkk",
+        "to": "bitcoincash:qqlrzp23w08434twmvr4fxw672whkjy0py26r63g3d",
+        "value": "1000",
+        "txid": "...",
+        "vout": 0,
+        "amount": "2000"
+      }
+    }
+  },
+  "paymentRequirements": {
+    "scheme": "utxo",
+    "network": "bip122:000000000000000000651ef99cb9fcbe",
+    "amount": "1000",
+    "payTo": "bitcoincash:qqlrzp23w08434twmvr4fxw672whkjy0py26r63g3d"
+  }
+}
+```
+
+**Response:**
+```json
+{
+  "isValid": true,
+  "payer": "bitcoincash:qz9s2mccqamzppfq708cyfde5ejgmsr9hy7r3unmkk",
+  "remainingBalanceSat": "9000",
+  "ledgerEntry": {
+    "utxoId": "txid:0",
+    "transactionValueSat": "20000",
+    "totalDebitedSat": "11000",
+    "lastUpdated": "2025-11-08T17:05:42.000Z"
+  }
+}
+```
