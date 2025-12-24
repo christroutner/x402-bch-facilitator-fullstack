@@ -96,6 +96,8 @@ class FacilitatorUseCase {
    */
   async findUtxoByAddress (payerAddress, payTo, requiredValue) {
     try {
+      console.log(`findUtxoByAddress() payerAddress: ${payerAddress}, payTo: ${payTo}, requiredValue: ${requiredValue}`)
+
       const addressDb = this.adapters?.levelDB?.addressDb
       if (!addressDb) {
         throw new Error('Address database not initialized')
@@ -112,6 +114,7 @@ class FacilitatorUseCase {
         // Address not found in database - no UTXOs for this address
         return null
       }
+      console.log(`findUtxoByAddress() addressUtxos: ${JSON.stringify(addressUtxos, null, 2)}`)
 
       // Filter UTXOs that pay to the server's address and have sufficient balance
       const validUtxos = addressUtxos
@@ -127,6 +130,7 @@ class FacilitatorUseCase {
           const timeB = new Date(b.firstSeen || 0).getTime()
           return timeA - timeB
         })
+      console.log(`findUtxoByAddress() validUtxos: ${JSON.stringify(validUtxos, null, 2)}`)
 
       // Return the oldest valid UTXO
       return validUtxos.length > 0 ? validUtxos[0] : null
@@ -283,6 +287,7 @@ class FacilitatorUseCase {
           await utxoDb.put(utxoId, record)
 
           // Add to addressDb
+          console.log(`Adding UTXO ${record.utxoId} to addressDb for payer address ${payerAddress}`)
           await this.addUtxoToAddressDb(addressDb, payerAddress, record)
 
           console.log('UTXO added to Level DB')
@@ -378,6 +383,8 @@ class FacilitatorUseCase {
       }
 
       await addressDb.put(payerAddress, addressUtxos)
+
+      console.log(`Updated addressDb for payer address ${payerAddress} with ${addressUtxos.length} UTXOs`)
     } catch (err) {
       console.error('Error adding UTXO to addressDb:', err)
       // Don't throw - this is a secondary index
@@ -539,6 +546,7 @@ class FacilitatorUseCase {
 
         // Find UTXO by address
         selectedUtxo = await this.findUtxoByAddress(payerAddress, payTo, requiredValue)
+        console.log(`Check my tab mode: Selected UTXO: ${JSON.stringify(selectedUtxo, null, 2)}`)
 
         if (!selectedUtxo) {
           return {
