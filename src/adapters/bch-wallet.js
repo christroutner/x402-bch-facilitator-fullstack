@@ -56,8 +56,8 @@ class BCHWalletAdapter {
       return {
         isValid: true,
         invalidReason: 'valid_utxo',
-        utxoAmountSat: valueSats
-
+        utxoAmountSat: valueSats,
+        receiverAddress // Add this line
       }
     } catch (err) {
       console.error('Error in BCHWalletAdapter.validateUtxo()', err)
