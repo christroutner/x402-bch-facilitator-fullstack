@@ -61,6 +61,7 @@ class FacilitatorUseCase {
     this.validateUtxo = this.validateUtxo.bind(this)
     this.verifyPayment = this.verifyPayment.bind(this)
     this.settlePayment = this.settlePayment.bind(this)
+    this.findUtxoByAddress = this.findUtxoByAddress.bind(this)
   }
 
   /**
@@ -84,8 +85,59 @@ class FacilitatorUseCase {
     }
   }
 
+  /**
+   * Finds a UTXO by payer address for "check my tab" mode.
+   * Selects the oldest available UTXO (FIFO) with sufficient balance.
+   *
+   * @param {string} payerAddress - The payer's BCH cash address
+   * @param {string} payTo - The server's BCH cash address (receiver)
+   * @param {bigint} requiredValue - The minimum satoshis required
+   * @returns {Promise<Object|null>} Selected UTXO record or null if none found
+   */
+  async findUtxoByAddress (payerAddress, payTo, requiredValue) {
+    try {
+      const addressDb = this.adapters?.levelDB?.addressDb
+      if (!addressDb) {
+        throw new Error('Address database not initialized')
+      }
+
+      // Get UTXOs for this payer address
+      let addressUtxos = []
+      try {
+        addressUtxos = await addressDb.get(payerAddress)
+        if (!Array.isArray(addressUtxos)) {
+          addressUtxos = []
+        }
+      } catch (err) {
+        // Address not found in database - no UTXOs for this address
+        return null
+      }
+
+      // Filter UTXOs that pay to the server's address and have sufficient balance
+      const validUtxos = addressUtxos
+        .filter(utxo => {
+          const receiverMatches = utxo.receiverAddress === payTo
+          const remainingBalance = BigInt(utxo.remainingBalanceSat ?? '0')
+          const hasSufficientBalance = remainingBalance >= requiredValue
+          return receiverMatches && hasSufficientBalance
+        })
+        .sort((a, b) => {
+          // Sort by firstSeen timestamp (oldest first, FIFO)
+          const timeA = new Date(a.firstSeen || 0).getTime()
+          const timeB = new Date(b.firstSeen || 0).getTime()
+          return timeA - timeB
+        })
+
+      // Return the oldest valid UTXO
+      return validUtxos.length > 0 ? validUtxos[0] : null
+    } catch (err) {
+      console.error('Error in findUtxoByAddress:', err)
+      return null
+    }
+  }
+
   // Validate a payment UTXO
-  async validateUtxo ({ paymentPayload, paymentRequirements }) {
+  async validateUtxo ({ paymentPayload, paymentRequirements, selectedUtxo = null }) {
     try {
       console.log('validateUtxo() paymentPayload:', paymentPayload)
       console.log('validateUtxo() paymentRequirements:', paymentRequirements)
@@ -131,14 +183,36 @@ class FacilitatorUseCase {
         }
       }
 
+      const { authorization } = paymentPayload.payload
+      const { txid, vout } = authorization
+      const payerAddress = authorization.from
+
+      // Handle "check my tab" mode - use selected UTXO if provided
+      let actualTxid = txid
+      let actualVout = vout
+      let isCheckMyTabMode = false
+
+      if (txid === '*') {
+        isCheckMyTabMode = true
+        if (!selectedUtxo) {
+          return {
+            isValid: false,
+            invalidReason: 'no_utxo_found_for_address'
+          }
+        }
+        actualTxid = selectedUtxo.txid
+        actualVout = selectedUtxo.vout
+      }
+
       // Generate unique identifier for UTXO,
       // UTXOs are uniquely identified by their TXID and the vout number.
-      const utxoId = `${paymentPayload.payload.authorization.txid}:${paymentPayload.payload.authorization.vout}`
+      const utxoId = `${actualTxid}:${actualVout}`
 
       // Ensure the UTXO database is initialized.
       const utxoDb = this.adapters?.levelDB?.utxoDb
-      if (!utxoDb) {
-        throw new Error('UTXO database not initialized')
+      const addressDb = this.adapters?.levelDB?.addressDb
+      if (!utxoDb || !addressDb) {
+        throw new Error('UTXO or address database not initialized')
       }
 
       const walletAdapter = this.adapters.bchWallet
@@ -150,9 +224,6 @@ class FacilitatorUseCase {
       const amountValue = paymentRequirements?.amount ?? paymentRequirements?.minAmountRequired ?? paymentRequirements?.maxAmountRequired ?? 0
       const callCostSat = BigInt(amountValue)
       // const revalidateThresholdMs = 5 * 60 * 1000 // 5 minutes
-      const { authorization } = paymentPayload.payload
-      const { txid, vout } = authorization
-      const payerAddress = authorization.from
 
       // Try to get the UTXO information from the Level DB
       let utxoInfo = null
@@ -165,83 +236,110 @@ class FacilitatorUseCase {
       if (!utxoInfo) {
         console.log('UTXO not found in Level DB')
 
-        // Validate the UTXO
-        const utxoValidation = await walletAdapter.validateUtxo({ txid, vout })
-        console.log('utxoValidation:', utxoValidation)
+        // If check my tab mode and we have selectedUtxo, use it (it should already be validated)
+        // Otherwise, validate the UTXO on-chain
+        if (isCheckMyTabMode && selectedUtxo) {
+          // Use the selected UTXO from addressDb
+          utxoInfo = selectedUtxo
+          // Ensure it's also in utxoDb (in case of data inconsistency)
+          await utxoDb.put(utxoId, utxoInfo)
+        } else {
+          // Validate the UTXO on-chain
+          const utxoValidation = await walletAdapter.validateUtxo({ txid: actualTxid, vout: actualVout })
+          console.log('utxoValidation:', utxoValidation)
 
-        const remainingBalanceSat = BigInt(utxoValidation.utxoAmountSat) - callCostSat
-        if (remainingBalanceSat < 0n) {
-          return {
-            isValid: false,
-            invalidReason: 'insufficient_utxo_balance',
-            utxoAmountSat: utxoValidation.utxoAmountSat.toString()
+          if (!utxoValidation.isValid) {
+            return {
+              isValid: false,
+              invalidReason: utxoValidation.invalidReason || 'utxo_not_found',
+              utxoAmountSat: null
+            }
           }
-        }
 
-        const timestamp = new Date().toISOString()
-        const record = {
-          utxoId,
-          txid,
-          vout,
-          payerAddress,
-          receiverAddress: utxoValidation.receiverAddress,
-          transactionValueSat: utxoValidation.utxoAmountSat.toString(),
-          remainingBalanceSat: remainingBalanceSat.toString(),
-          totalDebitedSat: callCostSat.toString(),
-          lastUpdated: timestamp,
-          firstSeen: timestamp,
-          lastChecked: timestamp
-        }
-
-        await utxoDb.put(utxoId, record)
-        console.log('UTXO added to Level DB')
-
-        return {
-          isValid: true,
-          remainingBalanceSat: remainingBalanceSat.toString(),
-          utxoInfo: record
-        }
-      } else {
-        const currentRemainingSat = BigInt(
-          utxoInfo.remainingBalanceSat ?? utxoInfo.remainingBalance ?? '0'
-        )
-        const totalDebitedSat = BigInt(
-          utxoInfo.totalDebitedSat ?? utxoInfo.totalDebited ?? '0'
-        )
-
-        const updatedRemainingSat = currentRemainingSat - callCostSat
-
-        if (updatedRemainingSat < 0n) {
-          return {
-            isValid: false,
-            invalidReason: 'insufficient_utxo_balance',
-            remainingBalanceSat: currentRemainingSat.toString()
+          const remainingBalanceSat = BigInt(utxoValidation.utxoAmountSat) - callCostSat
+          if (remainingBalanceSat < 0n) {
+            return {
+              isValid: false,
+              invalidReason: 'insufficient_utxo_balance',
+              utxoAmountSat: utxoValidation.utxoAmountSat.toString()
+            }
           }
-        }
 
-        const updatedTotalDebitedSat = totalDebitedSat + callCostSat
-        const timestamp = new Date().toISOString()
-        const updatedRecord = {
-          ...utxoInfo,
-          remainingBalanceSat: updatedRemainingSat.toString(),
-          totalDebitedSat: updatedTotalDebitedSat.toString(),
-          lastUpdated: timestamp,
-          lastChecked: timestamp
-        }
+          const timestamp = new Date().toISOString()
+          const record = {
+            utxoId,
+            txid: actualTxid,
+            vout: actualVout,
+            payerAddress,
+            receiverAddress: utxoValidation.receiverAddress,
+            transactionValueSat: utxoValidation.utxoAmountSat.toString(),
+            remainingBalanceSat: remainingBalanceSat.toString(),
+            totalDebitedSat: callCostSat.toString(),
+            lastUpdated: timestamp,
+            firstSeen: timestamp,
+            lastChecked: timestamp
+          }
 
-        await utxoDb.put(utxoId, updatedRecord)
+          await utxoDb.put(utxoId, record)
 
-        return {
-          isValid: true,
-          remainingBalanceSat: updatedRemainingSat.toString(),
-          utxoInfo: updatedRecord
+          // Add to addressDb
+          await this.addUtxoToAddressDb(addressDb, payerAddress, record)
+
+          console.log('UTXO added to Level DB')
+
+          return {
+            isValid: true,
+            remainingBalanceSat: remainingBalanceSat.toString(),
+            utxoInfo: record
+          }
         }
       }
 
-      // return {
-      //   isValid: false,
-      //   invalidReason: 'unknown_utxo_state'
-      // }
+      // Update existing UTXO
+      const currentRemainingSat = BigInt(
+        utxoInfo.remainingBalanceSat ?? utxoInfo.remainingBalance ?? '0'
+      )
+      const totalDebitedSat = BigInt(
+        utxoInfo.totalDebitedSat ?? utxoInfo.totalDebited ?? '0'
+      )
+
+      const updatedRemainingSat = currentRemainingSat - callCostSat
+
+      if (updatedRemainingSat < 0n) {
+        return {
+          isValid: false,
+          invalidReason: 'insufficient_utxo_balance',
+          remainingBalanceSat: currentRemainingSat.toString()
+        }
+      }
+
+      const updatedTotalDebitedSat = totalDebitedSat + callCostSat
+      const timestamp = new Date().toISOString()
+      const updatedRecord = {
+        ...utxoInfo,
+        remainingBalanceSat: updatedRemainingSat.toString(),
+        totalDebitedSat: updatedTotalDebitedSat.toString(),
+        lastUpdated: timestamp,
+        lastChecked: timestamp
+      }
+
+      await utxoDb.put(utxoId, updatedRecord)
+
+      // Update addressDb entry
+      await this.updateUtxoInAddressDb(addressDb, payerAddress, updatedRecord)
+
+      // If UTXO is consumed (remainingBalanceSat reaches 0), delete from both databases
+      if (updatedRemainingSat === 0n) {
+        await utxoDb.del(utxoId)
+        await this.removeUtxoFromAddressDb(addressDb, payerAddress, utxoId)
+        console.log('UTXO consumed and removed from databases')
+      }
+
+      return {
+        isValid: true,
+        remainingBalanceSat: updatedRemainingSat.toString(),
+        utxoInfo: updatedRecord
+      }
     } catch (err) {
       console.error('Error in validateUtxo:', err)
       return {
@@ -249,6 +347,100 @@ class FacilitatorUseCase {
         invalidReason: 'unexpected_utxo_validation_error',
         errorMessage: err.message
       }
+    }
+  }
+
+  /**
+   * Helper method to add a UTXO to the address-based database
+   * @private
+   */
+  async addUtxoToAddressDb (addressDb, payerAddress, utxoRecord) {
+    try {
+      let addressUtxos = []
+      try {
+        addressUtxos = await addressDb.get(payerAddress)
+        if (!Array.isArray(addressUtxos)) {
+          addressUtxos = []
+        }
+      } catch (err) {
+        // Address not found, start with empty array
+        addressUtxos = []
+      }
+
+      // Check if UTXO already exists in the array
+      const existingIndex = addressUtxos.findIndex(utxo => utxo.utxoId === utxoRecord.utxoId)
+      if (existingIndex >= 0) {
+        // Update existing entry
+        addressUtxos[existingIndex] = utxoRecord
+      } else {
+        // Add new entry
+        addressUtxos.push(utxoRecord)
+      }
+
+      await addressDb.put(payerAddress, addressUtxos)
+    } catch (err) {
+      console.error('Error adding UTXO to addressDb:', err)
+      // Don't throw - this is a secondary index
+    }
+  }
+
+  /**
+   * Helper method to update a UTXO in the address-based database
+   * @private
+   */
+  async updateUtxoInAddressDb (addressDb, payerAddress, utxoRecord) {
+    try {
+      let addressUtxos = []
+      try {
+        addressUtxos = await addressDb.get(payerAddress)
+        if (!Array.isArray(addressUtxos)) {
+          return // No UTXOs for this address
+        }
+      } catch (err) {
+        return // Address not found
+      }
+
+      // Find and update the UTXO
+      const index = addressUtxos.findIndex(utxo => utxo.utxoId === utxoRecord.utxoId)
+      if (index >= 0) {
+        addressUtxos[index] = utxoRecord
+        await addressDb.put(payerAddress, addressUtxos)
+      }
+    } catch (err) {
+      console.error('Error updating UTXO in addressDb:', err)
+      // Don't throw - this is a secondary index
+    }
+  }
+
+  /**
+   * Helper method to remove a UTXO from the address-based database
+   * @private
+   */
+  async removeUtxoFromAddressDb (addressDb, payerAddress, utxoId) {
+    try {
+      let addressUtxos = []
+      try {
+        addressUtxos = await addressDb.get(payerAddress)
+        if (!Array.isArray(addressUtxos)) {
+          return // No UTXOs for this address
+        }
+      } catch (err) {
+        return // Address not found
+      }
+
+      // Filter out the UTXO
+      const filteredUtxos = addressUtxos.filter(utxo => utxo.utxoId !== utxoId)
+
+      if (filteredUtxos.length === 0) {
+        // Remove the address key if no UTXOs remain
+        await addressDb.del(payerAddress)
+      } else {
+        // Update with filtered array
+        await addressDb.put(payerAddress, filteredUtxos)
+      }
+    } catch (err) {
+      console.error('Error removing UTXO from addressDb:', err)
+      // Don't throw - this is a secondary index
     }
   }
 
@@ -304,8 +496,14 @@ class FacilitatorUseCase {
 
       const { authorization, signature } = payload
       const payerAddress = authorization.from
+      const payTo = paymentRequirements.payTo
 
-      // Verify signature
+      // Check if this is "check my tab" mode
+      const isCheckMyTabMode = authorization.txid === '*'
+
+      // For check my tab mode, verify signature with the original authorization object
+      // (including txid: "*", vout: null, amount: null)
+      // For standard mode, use the authorization as-is
       const messageToVerify = JSON.stringify(authorization)
       let isValidSignature = false
 
@@ -332,8 +530,29 @@ class FacilitatorUseCase {
         }
       }
 
+      // Handle "check my tab" mode - select UTXO by address
+      let selectedUtxo = null
+      if (isCheckMyTabMode) {
+        // Calculate required value
+        const amountValue = paymentRequirements?.amount ?? paymentRequirements?.minAmountRequired ?? paymentRequirements?.maxAmountRequired ?? 0
+        const requiredValue = BigInt(amountValue)
+
+        // Find UTXO by address
+        selectedUtxo = await this.findUtxoByAddress(payerAddress, payTo, requiredValue)
+
+        if (!selectedUtxo) {
+          return {
+            isValid: false,
+            invalidReason: 'no_utxo_found_for_address',
+            payer: payerAddress
+          }
+        }
+
+        console.log('Check my tab mode: Selected UTXO:', selectedUtxo)
+      }
+
       // Validate the UTXO is still valid for paying for this call.
-      const utxoValidation = await this.validateUtxo({ paymentPayload, paymentRequirements })
+      const utxoValidation = await this.validateUtxo({ paymentPayload, paymentRequirements, selectedUtxo })
       console.log('utxoValidation:', utxoValidation)
 
       if (!utxoValidation.isValid) {
