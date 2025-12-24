@@ -19,6 +19,7 @@ class LevelDBAdapter {
 
     // Placeholders
     this.utxoDb = null
+    this.addressDb = null
 
     // Bind 'this' object to all class methods
     this.openDb = this.openDb.bind(this)
@@ -30,8 +31,14 @@ class LevelDBAdapter {
       cacheSize: 1024 * 1024 * 10 // 10MB
     })
 
+    this.addressDb = this.level(`${dbDir}/address`, {
+      valueEncoding: 'json',
+      cacheSize: 1024 * 1024 * 10 // 10MB
+    })
+
     return {
-      utxoDb: this.utxoDb
+      utxoDb: this.utxoDb,
+      addressDb: this.addressDb
     }
   }
 
@@ -39,6 +46,11 @@ class LevelDBAdapter {
     if (this.utxoDb) {
       await this.utxoDb.close()
       this.utxoDb = null
+    }
+
+    if (this.addressDb) {
+      await this.addressDb.close()
+      this.addressDb = null
     }
 
     return true
