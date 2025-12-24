@@ -18,7 +18,7 @@
     "dotenv": "17.2.3",
     "express": "5.1.0",
     "level": "7.0.1",
-    "minimal-slp-wallet": "7.0.3"
+    "minimal-slp-wallet": "7.0.5"
   },
   "devDependencies": {
     "c8": "^10.1.3",
