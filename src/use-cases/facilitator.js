@@ -96,11 +96,11 @@ class FacilitatorUseCase {
    */
   async findUtxoByAddress (payerAddress, payTo, requiredValue) {
     try {
-      console.log(`findUtxoByAddress() payerAddress: ${payerAddress}, payTo: ${payTo}, requiredValue: ${requiredValue}`)
+      // console.log(`findUtxoByAddress() payerAddress: ${payerAddress}, payTo: ${payTo}, requiredValue: ${requiredValue}`)
 
       const addressDb = this.adapters?.levelDB?.addressDb
       if (!addressDb) {
-        throw new Error('Address database not initialized')
+        // throw new Error('Address database not initialized')
       }
 
       // Get UTXOs for this payer address
@@ -114,7 +114,7 @@ class FacilitatorUseCase {
         // Address not found in database - no UTXOs for this address
         return null
       }
-      console.log(`findUtxoByAddress() addressUtxos: ${JSON.stringify(addressUtxos, null, 2)}`)
+      // console.log(`findUtxoByAddress() addressUtxos: ${JSON.stringify(addressUtxos, null, 2)}`)
 
       // Filter UTXOs that pay to the server's address and have sufficient balance
       const validUtxos = addressUtxos
@@ -130,7 +130,7 @@ class FacilitatorUseCase {
           const timeB = new Date(b.firstSeen || 0).getTime()
           return timeA - timeB
         })
-      console.log(`findUtxoByAddress() validUtxos: ${JSON.stringify(validUtxos, null, 2)}`)
+      // console.log(`findUtxoByAddress() validUtxos: ${JSON.stringify(validUtxos, null, 2)}`)
 
       // Return the oldest valid UTXO
       return validUtxos.length > 0 ? validUtxos[0] : null
@@ -462,8 +462,8 @@ class FacilitatorUseCase {
    * @returns Verification result with validity and payer address
    */
   async verifyPayment (paymentPayload, paymentRequirements) {
-    console.log('FacilitatorUseCase verifyPayment() paymentPayload:', paymentPayload)
-    console.log('FacilitatorUseCase verifyPayment() paymentRequirements:', paymentRequirements)
+    // console.log('FacilitatorUseCase verifyPayment() paymentPayload:', paymentPayload)
+    // console.log('FacilitatorUseCase verifyPayment() paymentRequirements:', paymentRequirements)
 
     try {
       const bchjs = this.adapters.bchWallet.bchjs
@@ -546,7 +546,7 @@ class FacilitatorUseCase {
 
         // Find UTXO by address
         selectedUtxo = await this.findUtxoByAddress(payerAddress, payTo, requiredValue)
-        console.log(`Check my tab mode: Selected UTXO: ${JSON.stringify(selectedUtxo, null, 2)}`)
+        // console.log(`Check my tab mode: Selected UTXO: ${JSON.stringify(selectedUtxo, null, 2)}`)
 
         if (!selectedUtxo) {
           return {
